@@ -1,0 +1,223 @@
+# ============================================================================
+# DOCKER COMPOSE PARA PRODUCCIÓN - INVENTARIO KM MOTOS
+# ============================================================================
+# Este archivo está optimizado para despliegue en servidor Ubuntu con
+# 2 discos de 500 TB para almacenamiento de imágenes y datos
+# ============================================================================
+
+services:
+  # Aplicación Snipe-IT
+  app:
+    image: snipe/snipe-it:${APP_VERSION:-v7.0.13}
+    container_name: snipeit-app
+    restart: unless-stopped
+    
+    # Volúmenes - Montados en discos externos de alta capacidad
+    volumes:
+      # Volumen principal de datos (montado en disco SDB de 500TB)
+      # Este contiene uploads, backups y archivos importantes
+      - /mnt/sdb/snipeit-data:/var/lib/snipeit
+      
+      # Archivo de configuración local
+      - ./.env:/var/www/html/.env:ro
+    
+    # Puertos
+    ports:
+      - "${APP_PORT:-8000}:80"
+      - "${APP_SSL_PORT:-8443}:443"
+    
+    # Dependencias
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+      redis:
+        condition: service_started
+    
+    # Variables de entorno
+    env_file:
+      - .env
+    
+    # Límites de recursos (ajustar según necesidad)
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Redes
+    networks:
+      - snipeit-network
+
+  # Base de datos MariaDB
+  db:
+    image: mariadb:11.4.7
+    container_name: snipeit-db
+    restart: unless-stopped
+    
+    # Volúmenes - Base de datos en disco SDC de 500TB para redundancia
+    volumes:
+      - /mnt/sdc/snipeit-db:/var/lib/mysql
+      # Opcional: Configuraciones personalizadas
+      # - ./docker/mysql-custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    
+    # Variables de entorno de base de datos
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Optimizaciones para almacenamiento grande
+      MYSQL_INNODB_BUFFER_POOL_SIZE: 2G
+      MYSQL_INNODB_LOG_FILE_SIZE: 512M
+      MYSQL_MAX_CONNECTIONS: 200
+    
+    # Límites de recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    
+    # Redes
+    networks:
+      - snipeit-network
+    
+    # Puertos (solo para debugging, comentar en producción)
+    # ports:
+    #   - "3306:3306"
+
+  # Redis para cache y sesiones
+  redis:
+    image: redis:7.4.3-alpine
+    container_name: snipeit-redis
+    restart: unless-stopped
+    
+    # Volumen para persistencia de Redis
+    volumes:
+      - /mnt/sdb/snipeit-redis:/data
+    
+    # Comando con configuración de persistencia
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    
+    # Límites de recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    
+    # Redes
+    networks:
+      - snipeit-network
+
+  # Nginx Reverse Proxy (opcional pero recomendado)
+  nginx:
+    image: nginx:alpine
+    container_name: snipeit-nginx
+    restart: unless-stopped
+    
+    # Puertos públicos
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    # Volúmenes
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+      - /mnt/sdb/nginx-logs:/var/log/nginx
+    
+    # Dependencias
+    depends_on:
+      - app
+    
+    # Límites de recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Redes
+    networks:
+      - snipeit-network
+
+  # Backup automático (opcional pero recomendado)
+  backup:
+    image: databack/mysql-backup:latest
+    container_name: snipeit-backup
+    restart: unless-stopped
+    
+    # Volumen para backups en disco SDC de 500TB
+    volumes:
+      - /mnt/sdc/snipeit-backups:/backup
+    
+    # Variables de entorno para backup
+    environment:
+      DB_SERVER: db
+      DB_PORT: 3306
+      DB_USER: ${DB_USERNAME}
+      DB_PASS: ${DB_PASSWORD}
+      DB_NAMES: ${DB_DATABASE}
+      DB_DUMP_FREQ: 1440  # Backup cada 24 horas
+      DB_DUMP_BEGIN: 0200  # Backup a las 2:00 AM
+      DB_CLEANUP_TIME: 8640  # Mantener backups por 6 días
+      COMPRESSION: gzip
+    
+    # Dependencias
+    depends_on:
+      - db
+    
+    # Redes
+    networks:
+      - snipeit-network
+
+# Redes
+networks:
+  snipeit-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+# NOTA: Los volúmenes se montan directamente desde los discos externos
+# No se usan volúmenes de Docker para tener control total del almacenamiento
+# Asegúrate de que /mnt/sdb y /mnt/sdc estén montados antes de iniciar
+# SDB = Disco 1 (500TB) - Datos de aplicación, uploads, cache
+# SDC = Disco 2 (500TB) - Base de datos y backups
