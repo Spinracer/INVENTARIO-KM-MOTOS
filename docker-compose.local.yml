@@ -1,0 +1,95 @@
+# ============================================================================
+# DOCKER COMPOSE PARA DESARROLLO LOCAL - INVENTARIO KM MOTOS
+# ============================================================================
+# Este archivo está optimizado para desarrollo local en devcontainer
+# ============================================================================
+
+services:
+  # Aplicación Snipe-IT
+  app:
+    image: snipe/snipe-it:${APP_VERSION:-v7.0.13}
+    container_name: snipeit-app-local
+    restart: unless-stopped
+    
+    volumes:
+      - ./local-storage/snipeit-data:/var/lib/snipeit
+      - ./.env:/var/www/html/.env:ro
+    
+    ports:
+      - "${APP_PORT:-8000}:80"
+    
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+      redis:
+        condition: service_started
+    
+    env_file:
+      - .env
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    networks:
+      - snipeit-network
+
+  # Base de datos MariaDB
+  db:
+    image: mariadb:11.4.7
+    container_name: snipeit-db-local
+    restart: unless-stopped
+    
+    volumes:
+      - ./local-storage/snipeit-db:/var/lib/mysql
+    
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    
+    healthcheck:
+      test: ["CMD", "mariadb", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    
+    networks:
+      - snipeit-network
+    
+    ports:
+      - "33060:3306"
+
+  # Redis para cache y sesiones
+  redis:
+    image: redis:7.4.3-alpine
+    container_name: snipeit-redis-local
+    restart: unless-stopped
+    
+    volumes:
+      - ./local-storage/snipeit-redis:/data
+    
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    
+    networks:
+      - snipeit-network
+
+# Redes
+networks:
+  snipeit-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.26.0.0/16
